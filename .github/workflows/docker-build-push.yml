@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Docker Build, Push, and Deploy
 
 on:
   push:
@@ -8,28 +8,32 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: cs6620-ec2-deployment
+  cancel-in-progress: false
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out code
-        uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push Docker image
+        id: docker_build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/cs6620-app:latest
@@ -41,3 +45,135 @@ jobs:
             build.workflow=${{ github.workflow }}
             build.run_id=${{ github.run_id }}
             build.run_number=${{ github.run_number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Show image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.docker_build.outputs.digest }}
+        run: |
+          echo "Image pushed successfully."
+          echo "Image digest: $IMAGE_DIGEST"
+
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy to EC2 and verify application
+        shell: bash
+        env:
+          EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          AWS_PAGER: ""
+        run: |
+          set -euo pipefail
+
+          IMAGE="${DOCKERHUB_USERNAME}/cs6620-app:latest"
+
+
+          jq -n --arg image "$IMAGE" '{
+            commands: [
+              "set -eu",
+              "systemctl start docker",
+
+              ("docker pull " + ($image | @sh)),
+
+              "docker stop cs6620-app || true",
+              "docker rm cs6620-app || true",
+
+              (
+                "docker run -d --restart unless-stopped " +
+                "--name cs6620-app -p 80:5000 " +
+                ($image | @sh)
+              ),
+
+              "echo Waiting for the application to respond...",
+
+              "for attempt in $(seq 1 30); do",
+              "  if curl -fsS --max-time 5 http://127.0.0.1:80/ > /dev/null; then",
+              "    echo Application is responding successfully.",
+              "    docker ps --filter name=cs6620-app",
+              "    docker logs --tail 30 cs6620-app",
+              "    exit 0",
+              "  fi",
+              "  sleep 2",
+              "done",
+
+              "echo Application verification failed.",
+              "docker logs --tail 50 cs6620-app || true",
+              "exit 1"
+            ],
+            executionTimeout: ["600"]
+          }' > ssm-parameters.json
+
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "GitHub Actions deployment: run ${GITHUB_RUN_ID}" \
+            --parameters file://ssm-parameters.json \
+            --timeout-seconds 120 \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: $COMMAND_ID"
+
+
+          for attempt in $(seq 1 90); do
+            if aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --output json \
+              > invocation.json 2> ssm-error.txt; then
+
+              STATUS=$(jq -r '.Status' invocation.json)
+              echo "SSM status: $STATUS"
+
+              case "$STATUS" in
+                Success)
+                  jq -r '.StandardOutputContent, .StandardErrorContent' \
+                    invocation.json
+                  echo "Deployment completed successfully."
+                  exit 0
+                  ;;
+
+                Failed|Cancelled|TimedOut)
+                  jq -r '.StandardOutputContent, .StandardErrorContent' \
+                    invocation.json
+                  echo "Deployment failed: $STATUS"
+                  exit 1
+                  ;;
+
+                Pending|InProgress|Delayed|Cancelling)
+                  ;;
+
+                *)
+                  cat invocation.json
+                  echo "Unexpected SSM status: $STATUS"
+                  exit 1
+                  ;;
+              esac
+            else
+              if ! grep -q "InvocationDoesNotExist" ssm-error.txt; then
+                cat ssm-error.txt
+                exit 1
+              fi
+            fi
+
+            sleep 10
+          done
+
+          echo "Timed out waiting for SSM."
+          echo "Check the command in Systems Manager > Run Command."
+          exit 1
