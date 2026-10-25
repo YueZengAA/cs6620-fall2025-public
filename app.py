@@ -1,13 +1,16 @@
 import os
 import re
 import csv
+from datetime import datetime, timezone
 from io import StringIO
 from flask import Flask, render_template, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 from pydub import AudioSegment
 import tempfile
 
-# Version: 1.0.1
+APP_VERSION = '2.0'
+DEPLOYMENT_METHOD = 'GitHub Actions + AWS SSM'
+RELEASE_ID = 'topic7-ssm-v2.0'
 
 app = Flask(__name__)
 CORS(app)
@@ -146,7 +149,25 @@ def index():
     """
     Renders the main HTML page for the client-side audio player.
     """
-    return render_template('index.html') 
+    return render_template(
+        'index.html',
+        app_version=APP_VERSION,
+        deployment_method=DEPLOYMENT_METHOD,
+        release_id=RELEASE_ID,
+    )
+
+
+@app.route('/health')
+def health():
+    """Report application health and release information."""
+    return jsonify(
+        status='healthy',
+        version=APP_VERSION,
+        deployment_method=DEPLOYMENT_METHOD,
+        release_id=RELEASE_ID,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
 
 @app.route('/select_directory', methods=['POST'])
 def select_directory():

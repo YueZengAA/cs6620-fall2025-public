@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Python Audio Player with WER Log</title>
+    <title>Python Audio Player | Version {{ app_version }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <style>
         html, body {
@@ -33,6 +33,20 @@
             max-width: 1200px;
             min-height: 100vh;
             margin: 0 auto;
+        }
+        .deployment-banner {
+            padding: 20px;
+            margin-bottom: 24px;
+            border: 1px solid #b6d4fe;
+            border-radius: 8px;
+            background-color: #eef6ff;
+            text-align: center;
+        }
+        .deployment-banner h1 {
+            margin-top: 0;
+        }
+        .deployment-banner p {
+            margin: 8px 0;
         }
         .section-box, .audio-controls, .playlist-section {
             width: 100%;
@@ -163,7 +177,13 @@
 </head>
 <body>
     <div class="container">
-        <h1>Python Network Audio Player</h1>
+        <section class="deployment-banner" aria-labelledby="deployment-heading">
+            <h1 id="deployment-heading">Hello from Automated CI/CD Pipeline!</h1>
+            <p><strong>Version {{ app_version }} — Automated Deployment</strong></p>
+            <p><strong>Deployed via:</strong> {{ deployment_method }}</p>
+            <p><strong>Release ID:</strong> {{ release_id }}</p>
+        </section>
+        <h2>Python Network Audio Player</h2>
 
         <div class="section-box log-upload-section">
             <h2>Load Error Log File</h2>
